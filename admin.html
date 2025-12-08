@@ -1,0 +1,931 @@
+<!DOCTYPE html>
+<html lang="it">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Zero Sorprese - Suite Commercialista</title>
+
+    <!-- 1. Stile Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- 2. React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+
+    <!-- 3. Prop-Types -->
+    <script src="https://unpkg.com/prop-types/prop-types.min.js"></script>
+
+    <!-- 4. Recharts -->
+    <script src="https://unpkg.com/recharts@2.12.0/umd/Recharts.js"></script>
+
+    <!-- 5. Lucide Icons -->
+    <script src="https://unpkg.com/lucide@0.263.1/dist/umd/lucide.min.js"></script>
+
+    <!-- 6. jsPDF & AutoTable -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.29/jspdf.plugin.autotable.min.js"></script>
+
+    <!-- 7. Babel -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <style>
+      @import url("https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap");
+      body { font-family: "Inter", sans-serif; background-color: #F8F9FC; }
+      .no-scrollbar::-webkit-scrollbar { display: none; }
+      .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+      .animate-in { animation: fadeIn 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards; opacity: 0; transform: translateY(10px); }
+      @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+    </style>
+
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            fontFamily: { sans: ["Inter", "sans-serif"] },
+            colors: {
+              brand: {
+                900: "#0F172A", // Slate 900
+                800: "#1E293B", // Slate 800
+                700: "#334155",
+                accent: "#10B981", // Emerald 500
+                blue: "#3B82F6",    // Blue 500
+              },
+            },
+          },
+        },
+      };
+    </script>
+  </head>
+
+  <body class="text-slate-900 antialiased h-screen overflow-hidden flex bg-[#F8F9FC]">
+    <div id="root" class="w-full h-full"></div>
+
+    <script type="text/babel">
+      const { useState, useMemo, useRef, useEffect } = React;
+      const Recharts = window.Recharts || {};
+      const { PieChart, Pie, Cell, BarChart, Bar, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip: RechartsTooltip, ResponsiveContainer, Legend } = Recharts;
+
+      // --- UTILS ---
+      const formatMoney = (val) => val?.toLocaleString("it-IT", { style: "currency", currency: "EUR", maximumFractionDigits: 0 }) || "€ 0";
+      const parseItalianNumber = (str) => {
+        if (!str) return 0;
+        const clean = str.toString().replace(/\./g, "").replace(",", ".").trim();
+        const num = parseFloat(clean);
+        return isNaN(num) ? 0 : num;
+      };
+
+      const Icon = ({ name, size = 20, className = "" }) => {
+        if (!window.lucide) return null;
+        const LucideIcon = window.lucide[name];
+        return LucideIcon ? <LucideIcon size={size} className={className} /> : null;
+      };
+
+      // --- CONFIGURAZIONE DEFAULT ---
+      const INITIAL_SETTINGS = {
+        regime: "forfettario",
+        coefficienteRedditivita: 78,
+        impostaSostitutiva: 15,
+        tipoInps: "gestione_separata", // gestione_separata | artigiani | cassa
+        aliquotaInps: 26.23, // Default GS
+        scaglioniIrpef: [
+          { limit: 28000, rate: 23 },
+          { limit: 50000, rate: 35 },
+          { limit: Infinity, rate: 43 },
+        ],
+      };
+
+      // --- HOOK CALCOLO FISCALE AVANZATO ---
+      const useTaxCalculator = (financialData, settings, simRevenue = 0, simCost = 0) => {
+        return useMemo(() => {
+            if (!financialData) return { taxableIncome: 0, taxes: 0, inps: 0, netIncome: 0, totalRevenue: 0, totalCostsReal: 0, marginalRate: 0, totalRate: 0 };
+
+            const totalRevenue = financialData.totalRevenue + simRevenue;
+            const totalCostsReal = financialData.totalCosts + simCost;
+            
+            // Per simulazioni, assumiamo costi extra deducibili al 100% nel regime ordinario
+            const totalDeductibleCosts = financialData.totalDeductibleCosts + simCost;
+
+            let taxableIncome = 0;
+            let taxes = 0;
+            let inps = 0;
+            let marginalRate = 0;
+
+            // 1. Calcolo INPS
+            let inpsBase = 0;
+            if (settings.regime === "forfettario") {
+                inpsBase = totalRevenue * (settings.coefficienteRedditivita / 100);
+            } else {
+                inpsBase = Math.max(0, totalRevenue - totalDeductibleCosts);
+            }
+
+            // Logica INPS Semplificata per Tipologia
+            if (settings.tipoInps === "artigiani") {
+                // Semplificazione: Minimale + Eccedenza (Logica approssimata per dashboard)
+                const minimale = 4400; // Valore indicativo annuo
+                const soglia = 18415;
+                if (inpsBase < soglia) inps = minimale;
+                else inps = minimale + ((inpsBase - soglia) * 0.24);
+            } else {
+                // Gestione Separata o Cassa (Aliquota secca)
+                inps = inpsBase * (settings.aliquotaInps / 100);
+            }
+
+            // 2. Calcolo Tasse (IRPEF o Sostitutiva)
+            if (settings.regime === "forfettario") {
+                taxableIncome = inpsBase;
+                // Deduzione contributi versati (assumiamo quelli calcolati anno corrente per semplicità previsionale)
+                const taxBase = Math.max(0, taxableIncome - inps);
+                taxes = taxBase * (settings.impostaSostitutiva / 100);
+                marginalRate = settings.impostaSostitutiva; 
+            } else {
+                // Ordinario
+                taxableIncome = Math.max(0, totalRevenue - totalDeductibleCosts);
+                const irpefBase = Math.max(0, taxableIncome - inps); // Deduzione INPS
+                
+                let remaining = irpefBase;
+                let calculatedIrpef = 0;
+                let prevLimit = 0;
+                
+                // Calcolo a Scaglioni
+                for (let bracket of settings.scaglioniIrpef) {
+                    if (remaining <= 0) break;
+                    const amountInBracket = Math.min(remaining, bracket.limit - prevLimit);
+                    calculatedIrpef += amountInBracket * (bracket.rate / 100);
+                    
+                    // Se stiamo "toccando" questo scaglione, è la nostra marginale
+                    if (irpefBase > prevLimit) marginalRate = bracket.rate;
+                    
+                    remaining -= amountInBracket;
+                    prevLimit = bracket.limit;
+                }
+                taxes = calculatedIrpef;
+            }
+
+            const totalTaxLoad = taxes + inps;
+            const netIncome = totalRevenue - totalCostsReal - totalTaxLoad;
+            const totalRate = totalRevenue > 0 ? (totalTaxLoad / totalRevenue) * 100 : 0;
+
+            return {
+                totalRevenue,
+                totalCostsReal,
+                taxableIncome, // Imponibile Lordo
+                taxes,
+                inps,
+                totalTaxLoad,
+                netIncome,
+                marginalRate,
+                totalRate
+            };
+
+        }, [financialData, settings, simRevenue, simCost]);
+      };
+
+      // --- COMPONENTI UI ---
+
+      const Logo = ({ collapsed }) => (
+        <div className={`flex flex-col select-none ${collapsed ? 'items-center' : 'px-6 py-8'}`}>
+          <div className="font-black text-xl tracking-tighter text-slate-900 flex items-center gap-1 leading-none">
+            <span>ZERO</span>{!collapsed && <span className="font-light">SORPRESE</span>}
+          </div>
+          {!collapsed && <div className="text-[9px] font-bold tracking-widest text-slate-400 uppercase mt-1">Suite Commercialista</div>}
+        </div>
+      );
+
+      const SidebarItem = ({ icon, label, active, onClick, disabled }) => (
+        <button 
+            onClick={onClick}
+            disabled={disabled}
+            className={`w-full flex items-center gap-3 px-6 py-3.5 text-sm font-semibold transition-all duration-200 border-l-[3px] 
+            ${active 
+                ? 'bg-slate-50 border-brand-900 text-brand-900' 
+                : 'border-transparent text-slate-500 hover:text-slate-800 hover:bg-slate-50'}
+            ${disabled ? 'opacity-50 cursor-not-allowed hover:bg-transparent' : ''}
+            `}
+        >
+            <Icon name={icon} size={20} className={active ? 'text-brand-900' : 'text-slate-400'} />
+            {label}
+        </button>
+      );
+
+      const StatCard = ({ label, value, icon, colorClass, subValue, variant = "white" }) => (
+        <div className={`p-6 rounded-2xl shadow-sm relative overflow-hidden group hover:shadow-md transition-all h-full flex flex-col justify-between ${
+            variant === "blue" 
+            ? "bg-gradient-to-br from-blue-600 to-blue-500 text-white border-none" 
+            : "bg-white border border-slate-100"
+        }`}>
+            <div>
+                <div className={`absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity ${variant === "white" ? colorClass : "text-white"}`}>
+                    <Icon name={icon} size={60} />
+                </div>
+                <p className={`text-xs font-bold uppercase tracking-wider mb-1 ${variant === "blue" ? "text-blue-100" : "text-slate-500"}`}>{label}</p>
+                <h3 className={`text-2xl font-bold ${variant === "blue" ? "text-white" : "text-slate-900"}`}>{formatMoney(value)}</h3>
+            </div>
+            {subValue && (
+                <div className={`mt-2 text-xs flex items-center gap-1 ${variant === "blue" ? "text-blue-100" : "text-slate-400"}`}>
+                    {subValue}
+                </div>
+            )}
+        </div>
+      );
+
+      // Card specifica per i doppi indicatori percentuali
+      const DualStatCard = ({ label, value1, label1, value2, label2, icon, colorClass }) => (
+        <div className="bg-white p-5 rounded-2xl border border-slate-100 shadow-sm relative overflow-hidden group hover:shadow-md transition-all h-full flex flex-col justify-between">
+            <div className={`absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity ${colorClass}`}>
+                <Icon name={icon} size={60} />
+            </div>
+            <p className="text-slate-500 text-xs font-bold uppercase tracking-wider mb-3">{label}</p>
+            <div className="space-y-3">
+                <div>
+                    <div className="flex justify-between items-baseline">
+                        <span className="text-2xl font-bold text-slate-900">{value1}</span>
+                        <span className="text-[10px] font-bold uppercase text-slate-400">{label1}</span>
+                    </div>
+                    <div className="w-full h-1.5 bg-slate-100 rounded-full mt-1 overflow-hidden">
+                        <div className={`h-full ${colorClass.replace('text-', 'bg-')}`} style={{width: value1}}></div>
+                    </div>
+                </div>
+                <div>
+                    <div className="flex justify-between items-baseline">
+                        <span className="text-lg font-bold text-slate-700">{value2}</span>
+                        <span className="text-[10px] font-bold uppercase text-slate-400">{label2}</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+      );
+
+      const MonthBadge = ({ label, isActive }) => (
+        <div className={`flex items-center justify-center py-3 px-1 rounded-xl border transition-all duration-300 ${isActive ? 'bg-emerald-50 border-emerald-200 shadow-sm scale-105' : 'bg-slate-50 border-slate-100 opacity-50 grayscale'}`}>
+            <span className={`text-xs font-bold uppercase tracking-wider ${isActive ? 'text-emerald-700' : 'text-slate-400'}`}>{label}</span>
+        </div>
+      );
+
+      const EfficiencyBar = ({ revenue, costs }) => {
+        const total = revenue || 1;
+        const costPerc = Math.min(100, (costs / total) * 100);
+        const marginPerc = Math.max(0, 100 - costPerc);
+        return (
+            <div className="w-full">
+                <div className="flex justify-between text-xs mb-2 font-medium">
+                    <span className="text-brand-900">Incidenza Costi ({costPerc.toFixed(1)}%)</span>
+                    <span className="text-brand-accent">Margine ({marginPerc.toFixed(1)}%)</span>
+                </div>
+                <div className="h-3 w-full bg-slate-100 rounded-full overflow-hidden flex">
+                    <div className="h-full bg-brand-900" style={{ width: `${costPerc}%` }}></div>
+                    <div className="h-full bg-brand-accent" style={{ width: `${marginPerc}%` }}></div>
+                </div>
+            </div>
+        );
+      };
+
+      // ----------------------------------------------------------------------
+      // VIEWS
+      // ----------------------------------------------------------------------
+
+      // 1. LOGIN
+      const LoginView = ({ onLogin }) => {
+          const [loading, setLoading] = useState(false);
+          const handleSubmit = (e) => {
+              e.preventDefault();
+              setLoading(true);
+              setTimeout(() => { onLogin({ name: "Studio Demo" }); }, 800);
+          };
+          return (
+            <div className="min-h-screen flex w-full font-sans">
+                {/* Left Side - Brand */}
+                <div className="hidden lg:flex w-5/12 bg-slate-900 relative items-center justify-center p-12 text-white overflow-hidden">
+                    <div className="absolute inset-0 bg-[url('https://www.transparenttextures.com/patterns/cubes.png')] opacity-10"></div>
+                    <div className="relative z-10 max-w-md">
+                        <h1 className="text-5xl font-black mb-6 leading-tight">La tua fiscalità,<br/><span className="text-emerald-400">sotto controllo.</span></h1>
+                        <p className="text-slate-400 text-lg mb-8">Zero Sorprese è la suite professionale per l'analisi predittiva e il controllo di gestione.</p>
+                        <div className="flex gap-4 text-sm font-bold text-slate-300">
+                            <span className="flex items-center gap-2"><Icon name="CheckCircle" className="text-emerald-400"/> Analisi Real-Time</span>
+                            <span className="flex items-center gap-2"><Icon name="CheckCircle" className="text-emerald-400"/> Simulatore Tasse</span>
+                        </div>
+                    </div>
+                </div>
+                
+                {/* Right Side - Form */}
+                <div className="w-full lg:w-7/12 bg-white flex items-center justify-center p-8 lg:p-24">
+                    <div className="w-full max-w-md animate-in">
+                        <div className="mb-10 text-center lg:text-left">
+                            <div className="lg:hidden mb-6 flex justify-center"><Logo collapsed={true}/></div>
+                            <h2 className="text-3xl font-bold text-slate-900">Bentornato</h2>
+                            <p className="text-slate-500 mt-2">Accedi alla tua area riservata.</p>
+                        </div>
+                        <form onSubmit={handleSubmit} className="space-y-6">
+                            <div>
+                                <label className="block text-xs font-bold uppercase text-slate-500 mb-2">Email Aziendale</label>
+                                <div className="relative">
+                                    <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none text-slate-400"><Icon name="User" size={18}/></div>
+                                    <input type="email" required className="w-full pl-11 pr-4 py-3.5 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:border-slate-900 focus:ring-0 transition-all font-medium" placeholder="nome@studio.it" />
+                                </div>
+                            </div>
+                            <div>
+                                <label className="block text-xs font-bold uppercase text-slate-500 mb-2">Password</label>
+                                <div className="relative">
+                                    <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none text-slate-400"><Icon name="Lock" size={18}/></div>
+                                    <input type="password" required className="w-full pl-11 pr-4 py-3.5 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:border-slate-900 focus:ring-0 transition-all font-medium" placeholder="••••••••" />
+                                </div>
+                            </div>
+                            <button disabled={loading} className="w-full bg-slate-900 text-white font-bold py-4 rounded-xl shadow-xl shadow-slate-900/10 hover:bg-slate-800 transition-all flex justify-center items-center gap-2 mt-4">
+                                {loading ? "Verifica credenziali..." : <>Accedi alla Console <Icon name="ArrowRight" size={18}/></>}
+                            </button>
+                        </form>
+                        <p className="text-center text-xs text-slate-400 mt-8">© {new Date().getFullYear()} Zero Sorprese Suite.</p>
+                    </div>
+                </div>
+            </div>
+          );
+      };
+
+      // 2. IMPORT DATI
+      const ImportView = ({ onUpload, loading, error }) => {
+        const fileInputRef = useRef(null);
+        return (
+            <div className="h-full flex flex-col items-center justify-center p-6 animate-in">
+                <div className="max-w-xl w-full bg-white p-12 rounded-3xl shadow-xl border border-slate-100 text-center relative z-10">
+                    <div className="w-20 h-20 bg-slate-50 rounded-full flex items-center justify-center mx-auto mb-6 text-slate-900">
+                        <Icon name="UploadCloud" size={32} />
+                    </div>
+                    <h2 className="text-2xl font-black text-slate-900 mb-2">Importazione Dati</h2>
+                    <p className="text-slate-500 mb-8">Carica il CSV analitico (Teamsystem) per popolare il cruscotto e inviare i dati all'App Cliente.</p>
+                    {error && <div className="mb-6 p-4 bg-rose-50 text-rose-600 rounded-xl text-sm font-medium flex gap-2 justify-center"><Icon name="AlertCircle" size={16} />{error}</div>}
+                    <div onClick={() => !loading && fileInputRef.current?.click()} className={`border-2 border-dashed rounded-2xl p-12 cursor-pointer transition-all group ${loading ? 'opacity-50' : 'hover:border-slate-900 hover:bg-slate-50 border-slate-200'}`}>
+                        {loading ? 
+                            <div className="flex flex-col items-center gap-3">
+                                <div className="w-6 h-6 border-2 border-slate-900 border-t-transparent rounded-full animate-spin"></div>
+                                <p className="font-bold text-slate-400">Elaborazione & Invio Cloud...</p>
+                            </div> 
+                            : 
+                            <>
+                                <p className="font-bold text-slate-700 group-hover:text-slate-900 transition-colors">Clicca per selezionare il file</p>
+                                <p className="text-xs text-slate-400 mt-2">Supporto .csv standard</p>
+                            </>
+                        }
+                    </div>
+                    <input type="file" ref={fileInputRef} className="hidden" accept=".csv" onChange={onUpload} />
+                </div>
+            </div>
+        );
+      };
+
+      // 3. HOME (CRUSCOTTO FISCALE)
+      const HomeView = ({ data, settings, taxData }) => {
+        if (!data) return <EmptyState />;
+        
+        const pieData = [
+            { name: "Netto", value: taxData.netIncome, color: "#10B981" }, // Emerald
+            { name: "Tasse", value: taxData.taxes, color: "#F43F5E" }, // Rose
+            { name: "INPS", value: taxData.inps, color: "#F59E0B" }, // Amber
+            { name: "Spese", value: taxData.totalCostsReal, color: "#94A3B8" } // Slate
+        ];
+
+        return (
+            <div className="p-8 max-w-7xl mx-auto w-full space-y-8 animate-in pb-20">
+                <div className="flex justify-between items-end">
+                    <div>
+                        <p className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">Situazione Fiscale: {settings.regime.toUpperCase()}</p>
+                        <h2 className="text-3xl font-black text-slate-900">Cruscotto Tasse</h2>
+                    </div>
+                    <div className="text-right">
+                        <p className="text-sm font-medium text-slate-500">Stato Sync</p>
+                        <p className="text-xs text-emerald-600 font-bold flex items-center justify-end gap-1"><span className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse"></span> Cliente Connesso</p>
+                    </div>
+                </div>
+
+                {/* KPI CARDS - GRID AGGIORNATA A 5 COLONNE su XL */}
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-6">
+                    <StatCard label="Imponibile Fiscale" value={taxData.taxableIncome} icon="Scale" colorClass="text-blue-500" subValue="Base di calcolo" />
+                    <StatCard label="Stima Tasse" value={taxData.taxes} icon="Landmark" colorClass="text-rose-500" subValue={settings.regime === 'forfettario' ? 'Imposta Sostitutiva' : 'IRPEF Stiimata'} />
+                    <StatCard label="Stima INPS" value={taxData.inps} icon="PiggyBank" colorClass="text-amber-500" subValue={settings.tipoInps.replace('_', ' ').toUpperCase()} />
+                    
+                    {/* NUOVA CARD PRESSIONE FISCALE UNIFICATA */}
+                    <DualStatCard 
+                        label="Pressione Fiscale" 
+                        icon="Percent" 
+                        colorClass="text-slate-600"
+                        value1={`${taxData.totalRate.toFixed(1)}%`} 
+                        label1="Tax Rate Totale"
+                        value2={`${taxData.marginalRate}%`} 
+                        label2="Aliquota Marginale"
+                    />
+
+                    <div className="bg-slate-900 text-white p-6 rounded-2xl shadow-xl relative overflow-hidden flex flex-col justify-between">
+                        <div className="absolute top-0 right-0 p-4 opacity-10"><Icon name="Wallet" size={60} /></div>
+                        <div>
+                            <p className="text-slate-400 text-xs font-bold uppercase tracking-wider mb-1">Disponibilità Reale</p>
+                            <h3 className="text-2xl font-bold text-white mb-1">{formatMoney(taxData.netIncome)}</h3>
+                        </div>
+                        <div className="mt-2 text-[10px] text-emerald-300 bg-white/10 w-fit px-2 py-1 rounded border border-white/10 flex items-center gap-1">
+                            <Icon name="CheckCircle" size={10} /> Netto in tasca
+                        </div>
+                    </div>
+                </div>
+
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                    {/* Grafico Distribuzione */}
+                    <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm flex flex-col lg:col-span-1">
+                        <div className="flex justify-between items-center mb-6">
+                            <h3 className="font-bold text-slate-800">Ripartizione Incassi</h3>
+                        </div>
+                        
+                        <div className="flex-1 min-h-[250px] relative">
+                            <ResponsiveContainer width="100%" height="100%">
+                                <PieChart>
+                                    <Pie data={pieData} innerRadius={60} outerRadius={80} paddingAngle={5} dataKey="value">
+                                        {pieData.map((entry, index) => <Cell key={index} fill={entry.color} />)}
+                                    </Pie>
+                                    <RechartsTooltip formatter={(val) => formatMoney(val)} />
+                                </PieChart>
+                            </ResponsiveContainer>
+                            <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+                                <span className="text-xs text-slate-400 uppercase">Fatturato</span>
+                                <span className="text-lg font-bold text-slate-900">{formatMoney(taxData.totalRevenue)}</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Timeline Pagamenti */}
+                    <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm lg:col-span-2">
+                        <h3 className="font-bold text-slate-800 mb-6 flex items-center gap-2"><Icon name="Calendar" size={18} className="text-slate-400"/> Scadenze Fiscali Stimate</h3>
+                        <div className="space-y-6 pl-4 border-l border-dashed border-slate-200 ml-2">
+                            <div className="relative pl-6 group">
+                                <div className="absolute -left-[21px] top-1 w-3 h-3 rounded-full bg-white border-2 border-slate-900 group-hover:bg-slate-900 transition-colors"></div>
+                                <div className="flex justify-between items-center bg-slate-50 p-4 rounded-xl transition-all hover:bg-white hover:shadow-md hover:border-slate-100 border border-transparent">
+                                    <div>
+                                        <p className="text-xs font-bold text-slate-400 uppercase">30 Giugno</p>
+                                        <p className="font-bold text-slate-900">Saldo Anno Prec. + 1° Acconto</p>
+                                    </div>
+                                    <div className="text-right font-mono font-bold text-rose-600">{formatMoney(taxData.totalTaxLoad * 0.6)}</div>
+                                </div>
+                            </div>
+                            <div className="relative pl-6 group">
+                                <div className="absolute -left-[21px] top-1 w-3 h-3 rounded-full bg-white border-2 border-slate-900 group-hover:bg-slate-900 transition-colors"></div>
+                                <div className="flex justify-between items-center bg-slate-50 p-4 rounded-xl transition-all hover:bg-white hover:shadow-md hover:border-slate-100 border border-transparent">
+                                    <div>
+                                        <p className="text-xs font-bold text-slate-400 uppercase">30 Novembre</p>
+                                        <p className="font-bold text-slate-900">2° Acconto</p>
+                                    </div>
+                                    <div className="text-right font-mono font-bold text-rose-600">{formatMoney(taxData.totalTaxLoad * 0.4)}</div>
+                                </div>
+                            </div>
+                        </div>
+                        <div className="mt-6 p-4 bg-blue-50 text-blue-800 text-xs rounded-xl flex gap-2">
+                            <Icon name="Info" size={16}/> 
+                            <span>Le scadenze sono indicative e calcolate sul totale imposte stimato. Verifica sempre con il commercialista.</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        );
+      };
+
+      // 4. ANALISI ECONOMICA (Blue Cards)
+      const AnalysisView = ({ data, onPrint }) => {
+        if (!data) return <EmptyState />;
+        
+        const topCosts = [...data.movements].filter(m => m.costo > 0).sort((a,b) => b.costo - a.costo).slice(0, 5);
+
+        return (
+            <div className="p-8 max-w-7xl mx-auto w-full space-y-8 animate-in pb-20">
+                <div className="flex justify-between items-end">
+                    <div>
+                        <p className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">Performance Aziendale</p>
+                        <h2 className="text-3xl font-black text-slate-900">{data.ragioneSociale}</h2>
+                    </div>
+                    <button onClick={onPrint} className="flex items-center gap-2 px-4 py-2 text-sm font-bold text-white bg-slate-900 hover:bg-slate-800 rounded-xl shadow-lg transition-all">
+                        <Icon name="Printer" size={16} /> Scarica Report
+                    </button>
+                </div>
+
+                {/* KPI CARDS STILE BLUE */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                    <StatCard label="Fatturato" value={data.totalRevenue} icon="TrendingUp" variant="blue" subValue="Valore Produzione" />
+                    <StatCard label="Costi Totali" value={data.totalCosts} icon="TrendingDown" variant="blue" subValue="Costi Produzione" />
+                    <StatCard label="Margine Operativo" value={data.netResult} icon="PieChart" variant="blue" subValue={`${data.totalRevenue > 0 ? ((data.netResult/data.totalRevenue)*100).toFixed(1) : 0}% sui ricavi`} />
+                </div>
+
+                <div className="bg-white rounded-2xl p-4 shadow-sm border border-slate-100">
+                    <div className="flex justify-between items-center mb-3">
+                        <h4 className="text-xs font-bold text-slate-500 uppercase flex gap-2"><Icon name="Calendar" size={14}/> Mensilità</h4>
+                    </div>
+                    <div className="grid grid-cols-6 md:grid-cols-12 gap-2">
+                        {data.monthlyData.map((m, idx) => <MonthBadge key={idx} label={m.month} isActive={m.isActive} />)}
+                    </div>
+                </div>
+
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                    <div className="lg:col-span-2 space-y-8">
+                        <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-6">
+                            <h3 className="font-bold text-slate-800 mb-6 flex items-center gap-2"><Icon name="BarChart3" size={18} className="text-slate-400"/> Trend Mensile</h3>
+                            <div className="h-64 w-full">
+                                <ResponsiveContainer width="100%" height="100%">
+                                    <BarChart data={data.monthlyData}>
+                                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9"/>
+                                        <XAxis dataKey="month" axisLine={false} tickLine={false} tick={{fontSize: 12}} />
+                                        <YAxis axisLine={false} tickLine={false} tick={{fontSize: 12}} />
+                                        <RechartsTooltip formatter={(val) => formatMoney(val)} cursor={{fill: '#f8fafc'}} />
+                                        <Bar dataKey="ricavi" fill="#10B981" radius={[4,4,0,0]} barSize={20} name="Ricavi"/>
+                                        <Bar dataKey="costi" fill="#F43F5E" radius={[4,4,0,0]} barSize={20} name="Costi"/>
+                                    </BarChart>
+                                </ResponsiveContainer>
+                            </div>
+                        </div>
+                        
+                        <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-6">
+                            <h3 className="font-bold text-slate-800 mb-6 flex items-center gap-2"><Icon name="List" size={18} className="text-slate-400"/> Top 5 Costi</h3>
+                            <div className="space-y-4">
+                                {topCosts.map((item, idx) => (
+                                    <div key={idx} className="flex justify-between items-center p-3 bg-slate-50 rounded-xl">
+                                        <span className="text-sm font-medium text-slate-700 truncate max-w-[200px]">{item.desc}</span>
+                                        <div className="text-right">
+                                            <div className="font-bold text-slate-900">{formatMoney(item.costo)}</div>
+                                            <div className="text-[10px] text-slate-400">{data.totalCosts > 0 ? ((item.costo/data.totalCosts)*100).toFixed(1) : 0}%</div>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="space-y-8">
+                        <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-6 flex flex-col">
+                            <h3 className="font-bold text-slate-800 mb-6 flex items-center gap-2"><Icon name="Zap" size={18} className="text-amber-500"/> Efficienza</h3>
+                            <div className="flex-1 flex flex-col justify-center">
+                                <p className="text-sm text-slate-600 mb-6 leading-relaxed">
+                                    Questa analisi mostra quanto del tuo fatturato viene assorbito dai costi operativi e quanto rimane come margine.
+                                </p>
+                                <EfficiencyBar revenue={data.totalRevenue} costs={data.totalCosts} />
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        );
+      };
+
+      // 5. SIMULATORE
+      const SimulatorView = ({ data, settings }) => {
+          if (!data) return <EmptyState />;
+          const [addRev, setAddRev] = useState(0);
+          const [addCost, setAddCost] = useState(0);
+          
+          const current = useTaxCalculator(data, settings);
+          const simulated = useTaxCalculator(data, settings, addRev, addCost);
+          const deltaNet = simulated.netIncome - current.netIncome;
+
+          return (
+            <div className="p-8 max-w-7xl mx-auto w-full space-y-8 animate-in pb-20">
+                <div className="bg-slate-900 text-white p-8 rounded-3xl shadow-xl">
+                    <h2 className="text-3xl font-black mb-2 flex items-center gap-3"><Icon name="Play" /> Simulatore Scenari</h2>
+                    <p className="text-slate-400">Proietta il futuro: inserisci variazioni di fatturato o costi.</p>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                    <div className="bg-white p-8 rounded-3xl border border-slate-100 shadow-sm space-y-6">
+                        <h3 className="font-bold text-slate-800">Parametri Simulazione</h3>
+                        <div>
+                            <label className="block text-xs font-bold text-slate-500 uppercase mb-2">Ricavi Aggiuntivi</label>
+                            <input type="number" value={addRev || ''} onChange={e => setAddRev(parseFloat(e.target.value)||0)} className="w-full text-xl font-bold p-4 bg-slate-50 rounded-xl border border-slate-200 text-emerald-600 focus:ring-2 focus:ring-emerald-500 focus:outline-none transition-all" placeholder="0" />
+                        </div>
+                        <div>
+                            <label className="block text-xs font-bold text-slate-500 uppercase mb-2">Costi Aggiuntivi</label>
+                            <input type="number" value={addCost || ''} onChange={e => setAddCost(parseFloat(e.target.value)||0)} className="w-full text-xl font-bold p-4 bg-slate-50 rounded-xl border border-slate-200 text-rose-500 focus:ring-2 focus:ring-rose-500 focus:outline-none transition-all" placeholder="0" />
+                        </div>
+                    </div>
+
+                    <div className="bg-slate-900 text-white p-8 rounded-3xl shadow-xl flex flex-col justify-center border border-slate-800">
+                        <p className="text-slate-400 text-xs font-bold uppercase tracking-wider mb-2">Nuovo Netto Stimato</p>
+                        <h3 className="text-5xl font-black mb-4">{formatMoney(simulated.netIncome)}</h3>
+                        <div className={`text-lg font-bold flex items-center gap-2 ${deltaNet >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                            {deltaNet > 0 ? '+' : ''}{formatMoney(deltaNet)} <span className="text-xs font-normal text-slate-500 opacity-80">rispetto ad ora</span>
+                        </div>
+                        <div className="mt-8 p-4 bg-white/5 rounded-xl border border-white/10">
+                            <p className="text-sm text-slate-300">
+                                Su una variazione di <b>{formatMoney(addRev - addCost)}</b>, pagherai circa <b>{formatMoney(simulated.totalTaxLoad - current.totalTaxLoad)}</b> di tasse in più.
+                            </p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+          );
+      };
+
+      // 6. SETUP
+      const SettingsView = ({ settings, setSettings }) => {
+          return (
+            <div className="p-8 max-w-3xl mx-auto w-full animate-in">
+                <h2 className="text-2xl font-black text-slate-900 mb-8">Configurazione Fiscale</h2>
+                <div className="bg-white p-8 rounded-3xl border border-slate-100 shadow-sm space-y-8">
+                    <div>
+                        <label className="block text-sm font-bold text-slate-700 mb-3">Regime Fiscale</label>
+                        <div className="flex bg-slate-100 p-1 rounded-xl">
+                            <button onClick={() => setSettings({...settings, regime: 'forfettario'})} className={`flex-1 py-3 text-sm font-bold rounded-lg transition-all ${settings.regime === 'forfettario' ? 'bg-white shadow-sm text-slate-900' : 'text-slate-400'}`}>Forfettario</button>
+                            <button onClick={() => setSettings({...settings, regime: 'ordinario'})} className={`flex-1 py-3 text-sm font-bold rounded-lg transition-all ${settings.regime === 'ordinario' ? 'bg-white shadow-sm text-slate-900' : 'text-slate-400'}`}>Ordinario</button>
+                        </div>
+                    </div>
+
+                    <div>
+                        <label className="block text-sm font-bold text-slate-700 mb-3">Cassa Previdenziale</label>
+                        <select value={settings.tipoInps} onChange={e => setSettings({...settings, tipoInps: e.target.value})} className="w-full p-3 bg-slate-50 rounded-xl border border-slate-200 font-bold focus:outline-none focus:border-slate-900 transition-colors">
+                            <option value="gestione_separata">INPS Gestione Separata (Freelance)</option>
+                            <option value="artigiani">INPS Artigiani e Commercianti</option>
+                            <option value="cassa">Cassa Professionale (Albo)</option>
+                        </select>
+                    </div>
+
+                    {/* Dettagli Forfettario */}
+                    {settings.regime === 'forfettario' && (
+                        <div className="grid grid-cols-2 gap-4 animate-in">
+                            <div>
+                                <label className="block text-xs font-bold text-slate-500 uppercase mb-2">Coeff. Redditività</label>
+                                <input type="number" value={settings.coefficienteRedditivita} onChange={e => setSettings({...settings, coefficienteRedditivita: parseFloat(e.target.value)})} className="w-full p-3 bg-slate-50 rounded-xl border border-slate-200 font-bold" />
+                            </div>
+                            <div>
+                                <label className="block text-xs font-bold text-slate-500 uppercase mb-2">Imp. Sostitutiva</label>
+                                <select value={settings.impostaSostitutiva} onChange={e => setSettings({...settings, impostaSostitutiva: parseFloat(e.target.value)})} className="w-full p-3 bg-slate-50 rounded-xl border border-slate-200 font-bold">
+                                    <option value="5">5% (Start-up)</option>
+                                    <option value="15">15% (Standard)</option>
+                                </select>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Informative Ordinario */}
+                    {settings.regime === 'ordinario' && (
+                        <div className="space-y-6 animate-in">
+                            <div>
+                                <h4 className="text-sm font-bold text-slate-900 mb-3 flex items-center gap-2"><Icon name="Info" size={16}/> Scaglioni IRPEF (Attuali)</h4>
+                                <div className="border border-slate-200 rounded-xl overflow-hidden text-sm">
+                                    <div className="grid grid-cols-2 bg-slate-50 p-2 font-bold text-slate-500 border-b border-slate-200">
+                                        <span>Reddito</span><span>Aliquota</span>
+                                    </div>
+                                    {settings.scaglioniIrpef.map((row, idx) => (
+                                        <div key={idx} className="grid grid-cols-2 p-2 border-b border-slate-100 last:border-0 bg-white">
+                                            <span>Fino a {row.limit === Infinity ? 'Oltre' : formatMoney(row.limit)}</span>
+                                            <span className="font-mono text-slate-900">{row.rate}%</span>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                            <div>
+                                <h4 className="text-sm font-bold text-slate-900 mb-3 flex items-center gap-2"><Icon name="Info" size={16}/> Parametri INPS Selezionati</h4>
+                                <div className="p-4 bg-blue-50 text-blue-800 rounded-xl text-sm border border-blue-100">
+                                    Hai selezionato <b>{settings.tipoInps.replace('_', ' ').toUpperCase()}</b>. L'aliquota di calcolo stimata è del <b>{settings.aliquotaInps}%</b> {settings.tipoInps === 'artigiani' && "con calcolo minimale/eccedenza applicato"}.
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            </div>
+          );
+      };
+
+      const EmptyState = () => (
+        <div className="h-full flex flex-col items-center justify-center text-slate-400 animate-in p-8 text-center">
+            <div className="w-24 h-24 bg-slate-100 rounded-full flex items-center justify-center mb-4"><Icon name="UploadCloud" size={40} className="text-slate-300"/></div>
+            <h3 className="text-lg font-bold text-slate-600">Nessun dato presente</h3>
+            <p>Vai alla sezione Importa Dati per iniziare.</p>
+        </div>
+      );
+
+      // --- APP ROOT ---
+      const App = () => {
+        const [user, setUser] = useState(null);
+        const [activeTab, setActiveTab] = useState('import');
+        const [financialData, setFinancialData] = useState(null);
+        const [settings, setSettings] = useState(INITIAL_SETTINGS);
+        
+        const taxData = useTaxCalculator(financialData, settings);
+
+        // Funzione Print "Executive"
+        const handlePrint = () => {
+            if (!financialData || !window.jspdf) return;
+            const { jsPDF } = window.jspdf;
+            const doc = new jsPDF();
+            
+            // Colori & Font
+            const colorDark = [15, 23, 42]; 
+            const colorAccent = [16, 185, 129];
+            const colorDanger = [244, 63, 94];
+            
+            // --- HEADER ---
+            doc.setFillColor(...colorDark);
+            doc.rect(0, 0, 210, 40, 'F');
+            doc.setTextColor(255, 255, 255);
+            doc.setFontSize(24); doc.setFont("helvetica", "bold"); doc.text("ZERO", 15, 20);
+            doc.setFont("helvetica", "normal"); doc.text("SORPRESE", 50, 20);
+            doc.setFontSize(10); doc.setTextColor(...colorAccent); doc.text("REPORT ESECUTIVO DI GESTIONE", 15, 28);
+
+            // --- CLIENTE INFO ---
+            doc.setTextColor(100); doc.setFontSize(10); doc.text(`Cliente:`, 15, 50);
+            doc.setTextColor(...colorDark); doc.setFont("helvetica", "bold"); doc.text(financialData.ragioneSociale, 35, 50);
+            doc.setFont("helvetica", "normal"); doc.setTextColor(100); doc.text(`Data: ${new Date().toLocaleDateString()}`, 150, 50);
+
+            // --- KPI BOXES (Disegnati) ---
+            const drawBox = (x, title, value, color) => {
+                doc.setDrawColor(200); doc.setFillColor(250); doc.roundedRect(x, 60, 55, 25, 2, 2, 'FD');
+                doc.setFontSize(8); doc.setTextColor(100); doc.text(title.toUpperCase(), x+5, 68);
+                doc.setFontSize(14); doc.setTextColor(...color); doc.setFont("helvetica", "bold"); doc.text(formatMoney(value), x+5, 78);
+            };
+            drawBox(15, "Fatturato", financialData.totalRevenue, colorDark);
+            drawBox(75, "Margine Op.", financialData.netResult, colorAccent);
+            drawBox(135, "Utile Fiscale", financialData.taxableIncome, colorDark);
+
+            // --- CONTO ECONOMICO RICLASSIFICATO ---
+            doc.autoTable({
+                startY: 95,
+                head: [['Voce Economica', 'Importo', 'Incidenza']],
+                body: [
+                    ['A) Valore della Produzione (Ricavi)', formatMoney(financialData.totalRevenue), '100%'],
+                    ['B) Costi della Produzione', `(${formatMoney(financialData.totalCosts)})`, `${((financialData.totalCosts/financialData.totalRevenue)*100).toFixed(1)}%`],
+                    ['= RISULTATO OPERATIVO (A-B)', formatMoney(financialData.netResult), `${((financialData.netResult/financialData.totalRevenue)*100).toFixed(1)}%`],
+                    ['+/- Variazioni Fiscali (Indeducibilità)', `+ ${formatMoney(Math.max(0, financialData.taxableIncome - financialData.netResult))}`, '-'],
+                    ['= UTILE FISCALE IMPONIBILE', formatMoney(financialData.taxableIncome), '-']
+                ],
+                theme: 'grid',
+                headStyles: { fillColor: colorDark, textColor: [255,255,255] },
+                columnStyles: { 0: { fontStyle: 'bold' }, 1: { halign: 'right' }, 2: { halign: 'center' } },
+                didParseCell: (data) => {
+                    if(data.row.index === 2 || data.row.index === 4) { data.cell.styles.fontStyle = 'bold'; data.cell.styles.fillColor = [240, 253, 244]; }
+                }
+            });
+
+            // --- GRAFICO A BARRE (Vettoriale) ---
+            let finalY = doc.lastAutoTable.finalY + 15;
+            doc.setFontSize(11); doc.setTextColor(...colorDark); doc.text("Analisi Visiva", 15, finalY);
+            finalY += 10;
+            const maxVal = Math.max(financialData.totalRevenue, financialData.totalCosts);
+            const wMax = 140;
+            
+            // Ricavi
+            doc.setFillColor(59, 130, 246); doc.roundedRect(40, finalY, (financialData.totalRevenue/maxVal)*wMax, 8, 1, 1, 'F');
+            doc.setFontSize(8); doc.text("Ricavi", 15, finalY+5);
+            // Costi
+            finalY += 12;
+            doc.setFillColor(244, 63, 94); doc.roundedRect(40, finalY, (financialData.totalCosts/maxVal)*wMax, 8, 1, 1, 'F');
+            doc.text("Costi", 15, finalY+5);
+            // Margine
+            finalY += 12;
+            doc.setFillColor(...colorAccent); doc.roundedRect(40, finalY, (Math.max(0,financialData.netResult)/maxVal)*wMax, 8, 1, 1, 'F');
+            doc.text("Margine", 15, finalY+5);
+
+            // Footer
+            doc.setFontSize(8); doc.setTextColor(150); doc.text('Generato con Zero Sorprese Suite', 105, 290, null, null, 'center');
+            doc.save('Report_Analisi.pdf');
+        };
+
+        const handleUpload = (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = (evt) => {
+                try {
+                    const text = evt.target.result;
+                    const rows = text.split("\n");
+                    const data = [];
+                    const monthlyTotals = Array(12).fill(0).map((_, i) => ({ month: ["GEN","FEB","MAR","APR","MAG","GIU","LUG","AGO","SET","OTT","NOV","DIC"][i], ricavi: 0, costi: 0, isActive: false }));
+                    
+                    let ragSoc = "Cliente";
+                    let totalRev = 0, totalCost = 0, totalDed = 0;
+
+                    for (let i = 1; i < rows.length; i++) {
+                        const row = rows[i].trim();
+                        if (!row) continue;
+                        const cols = row.split(/;(?=(?:(?:[^"]*"){2})*[^"]*$)/);
+                        if(cols.length < 10) continue;
+                        if(ragSoc === "Cliente" && cols[1]) ragSoc = cols[1].replace(/"/g, "").trim();
+
+                        const desc = cols[4] ? cols[4].replace(/"/g, "").trim() : "Mov";
+                        const dare = parseItalianNumber(cols[7]); 
+                        const avere = parseItalianNumber(cols[8]); 
+                        const percInd = parseItalianNumber(cols[24]);
+                        const tipoConto = cols[27];
+
+                        if (tipoConto === '1') continue;
+
+                        const isRicavo = avere !== 0;
+                        const isCosto = dare !== 0;
+                        const valCosto = Math.abs(dare);
+                        const valRicavo = Math.abs(avere);
+
+                        if(isRicavo || isCosto) {
+                            data.push({ id: i, desc, costo: valCosto, ricavo: valRicavo, indeducibilita: percInd });
+                            if(isRicavo) {
+                                totalRev += valRicavo;
+                            }
+                            if(isCosto) {
+                                totalCost += valCosto;
+                                const ded = valCosto * (1 - (isNaN(percInd)?0:percInd)/100);
+                                totalDed += ded;
+                            }
+                            for(let m=0; m<12; m++) {
+                                const valMese = Math.abs(parseItalianNumber(cols[10+m]));
+                                if(valMese !== 0) {
+                                    monthlyTotals[m].isActive = true;
+                                    if(isRicavo) monthlyTotals[m].ricavi += valMese;
+                                    if(isCosto) monthlyTotals[m].costi += valMese;
+                                }
+                            }
+                        }
+                    }
+
+                    const topCosts = [...data].filter(m => m.costo > 0).sort((a,b) => b.costo - a.costo).slice(0, 5);
+                    
+                    const newData = {
+                        ragioneSociale: ragSoc,
+                        movements: data,
+                        monthlyData: monthlyTotals,
+                        totalRevenue: totalRev,
+                        totalCosts: totalCost,
+                        totalDeductibleCosts: totalDed,
+                        netResult: totalRev - totalCost,
+                        taxableIncome: totalRev - totalDed 
+                    };
+
+                    setFinancialData(newData);
+                    
+                    // --- SYNC WITH CLIENT APP ---
+                    // Trasformiamo i dati nel formato che l'App Cliente si aspetta
+                    const taxesEstimate = newData.taxableIncome * 0.25; // Stima grezza
+                    const clientFormat = {
+                        companyName: newData.ragioneSociale,
+                        revenue: newData.totalRevenue,
+                        costs: newData.totalCosts,
+                        taxesEstimate: taxesEstimate,
+                        netIncome: newData.netResult - taxesEstimate, // Stima netto dopo tasse
+                        healthScore: Math.min(100, Math.max(0, Math.round(((newData.totalRevenue - newData.totalCosts) / newData.totalRevenue) * 100) + 50)),
+                        monthlyTrend: monthlyTotals.map(m => ({
+                            m: m.month,
+                            ricavi: m.ricavi,
+                            costi: m.costi,
+                            isActive: m.isActive
+                        })),
+                        topCosts: topCosts.map(c => ({
+                            desc: c.desc,
+                            amount: c.costo
+                        })),
+                        // Simuliamo il calendario scadenze
+                        calendar: [
+                            { date: "16 Mag", title: "Liquidazione IVA", amount: newData.totalRevenue * 0.02 },
+                            { date: "30 Giu", title: "Saldo + 1° Acc.", amount: taxesEstimate * 0.6 },
+                            { date: "30 Nov", title: "2° Acconto", amount: taxesEstimate * 0.4 },
+                        ],
+                        notifications: [
+                            { id: 1, type: 'info', title: "Dati Aggiornati dal Commercialista", msg: "La tua situazione è stata sincronizzata.", date: "Adesso" }
+                        ]
+                    };
+
+                    // SALVIAMO NEL LOCALSTORAGE CONDIVISO
+                    localStorage.setItem('zs_shared_db', JSON.stringify(clientFormat));
+                    // Triggeriamo l'evento storage manualmente per la tab corrente (opzionale, utile per test locale)
+                    window.dispatchEvent(new Event('storage'));
+                    
+                    setActiveTab('analysis');
+
+                } catch (e) { alert("Errore lettura CSV"); console.error(e); }
+            };
+            reader.readAsText(file);
+        };
+
+        if (!user) return <LoginView onLogin={setUser} />;
+
+        return (
+            <div className="flex h-full w-full">
+                {/* SIDEBAR */}
+                <aside className="w-64 bg-white border-r border-slate-200 flex flex-col z-20 shadow-sm">
+                    <Logo collapsed={false}/>
+                    <div className="flex-1 px-3 py-4 space-y-1">
+                        <p className="px-4 text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-2">Generale</p>
+                        <SidebarItem icon="LayoutDashboard" label="Home Fiscale" active={activeTab==='home'} onClick={() => setActiveTab('home')} disabled={!financialData} />
+                        <SidebarItem icon="BarChart3" label="Analisi Economica" active={activeTab==='analysis'} onClick={() => setActiveTab('analysis')} disabled={!financialData} />
+                        <SidebarItem icon="Play" label="Simulatore" active={activeTab==='simulator'} onClick={() => setActiveTab('simulator')} disabled={!financialData} />
+                        
+                        <p className="px-4 text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-2 mt-6">Strumenti</p>
+                        <SidebarItem icon="UploadCloud" label="Importa Dati" active={activeTab==='import'} onClick={() => setActiveTab('import')} />
+                        <SidebarItem icon="Settings" label="Setup" active={activeTab==='settings'} onClick={() => setActiveTab('settings')} />
+                    </div>
+                    <div className="p-4 border-t border-slate-100">
+                        <button onClick={() => setUser(null)} className="w-full flex items-center gap-2 text-xs font-bold text-slate-500 hover:text-slate-900 p-2"><Icon name="LogOut" size={14}/> Esci</button>
+                    </div>
+                </aside>
+
+                {/* MAIN */}
+                <main className="flex-1 overflow-y-auto relative">
+                    {activeTab === 'import' && <ImportView onUpload={handleUpload} />}
+                    {activeTab === 'home' && <HomeView data={financialData} settings={settings} taxData={taxData} />}
+                    {activeTab === 'analysis' && <AnalysisView data={financialData} onPrint={handlePrint} />}
+                    {activeTab === 'simulator' && <SimulatorView data={financialData} settings={settings} />}
+                    {activeTab === 'settings' && <SettingsView settings={settings} setSettings={setSettings} />}
+                </main>
+            </div>
+        );
+      };
+
+      const root = ReactDOM.createRoot(document.getElementById("root"));
+      root.render(<App />);
+    </script>
+  </body>
+</html>
